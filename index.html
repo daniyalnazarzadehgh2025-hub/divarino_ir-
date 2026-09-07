@@ -2604,6 +2604,12 @@ body:has(#chat.active){
 #bottomNav button.active{color:#e21b23!important}
 </style>
 
+<style id="divarino-otp-auth">
+.otp-code-input{width:100%;height:58px;border:1.5px solid #e9e9e9;border-radius:14px;background:#fbfbfb;text-align:center;letter-spacing:8px;font-size:24px;font-weight:900;outline:none;transition:.15s}
+.otp-code-input:focus{border-color:#e21b23;background:#fff;box-shadow:0 0 0 4px rgba(226,27,35,.09)}
+.otp-back-btn{width:100%;height:48px;border-radius:14px;margin-top:10px}
+#otpSendBtn:disabled,#otpVerifyBtn:disabled{opacity:.65;cursor:wait}
+</style>
 <!-- DIVARINO SUPABASE ONLINE SYNC: keeps existing UI and local fallback intact -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
@@ -2830,53 +2836,230 @@ body:has(#chat.active){
   window.divarinoTouchPresence=function(){const me=currentUser();if(!me?.id)return;me.lastSeen=Date.now();save();window.divarinoRemotePutUser(me)};
   window.divarinoWatchOtherPresence=function(otherId){divarinoStopWatchingOtherPresence?.();divarinoPresenceRefreshTimer=setInterval(()=>divarinoRefreshPresenceBadge(otherId),20000);divarinoRefreshPresenceBadge(otherId)};
 
-  // Cross-device registration/login: keep the existing Persian username/password UI.
-  window.register=async function(){
-    if(window.divarinoAccountResetPromise)await window.divarinoAccountResetPromise;
-    const u=document.getElementById('au').value,p=normalizePhone(document.getElementById('ap').value),pass=document.getElementById('apass').value,pass2=document.getElementById('apass2')?.value||'',terms=!!document.getElementById('acceptTerms')?.checked,e=document.getElementById('authErr');e.classList.remove('show');
-    if(!validPersianUsername(u)){e.textContent='نام کاربری اجباری است و باید فقط با حروف فارسی نوشته شود.';e.classList.add('show');return}
-    if(!p){e.textContent='شماره تلفن را کامل وارد کنید.';e.classList.add('show');return}
-    if(!pass){e.textContent='رمز عبور الزامی است.';e.classList.add('show');return}
-    if(!validPassword(pass)){e.textContent='رمز عبور نمی‌تواند شامل حروف فارسی یا عربی باشد.';e.classList.add('show');return}
-    if(pass!==pass2){e.textContent='رمز عبور و تکرار رمز عبور یکسان نیستند.';e.classList.add('show');return}
-    if(!terms){e.textContent='پذیرش قوانین و شرایط برای ثبت‌نام الزامی است.';e.classList.add('show');return}
-    const passwordHash=await hashPassword(pass);
-    if(state.users.some(x=>getUserPhone(x)===p)){e.textContent='این شماره تلفن قبلاً ثبت شده است.';e.classList.add('show');return}
-    if(state.users.some(x=>x.passwordHash===passwordHash)){e.textContent='این رمز عبور قبلاً توسط کاربر دیگری استفاده شده است. لطفاً رمز عبور دیگری انتخاب کنید.';e.classList.add('show');return}
+  // Passwordless OTP authentication: send and verify codes through the smart-responder Edge Function.
+  const DIVARINO_OTP_FUNCTION_URL = SUPABASE_URL + '/functions/v1/smart-responder';
+  let divarinoOtpFlow = { mode:'login', phone:'', username:'' };
+
+  function otpSetError(message){
+    const e=document.getElementById('authErr');
+    if(!e)return;
+    e.textContent=message||'';
+    e.classList.toggle('show',!!message);
+  }
+
+  function otpPhoneForApi(v){
+    const p=normalizePhone(v);
+    if(/^09\d{9}$/.test(p))return '+98'+p.slice(1);
+    if(/^9\d{9}$/.test(p))return '+98'+p;
+    if(/^\+989\d{9}$/.test(p))return p;
+    return p;
+  }
+
+  function otpDigits(v){
+    return String(v??'').normalize('NFKC')
+      .replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+      .replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+  }
+
+  async function divarinoOtpRequest(action, phone, otp){
+    const headers={
+      'Content-Type':'application/json',
+      'apikey':SUPABASE_KEY,
+      'Authorization':'Bearer '+SUPABASE_KEY
+    };
+    const body={action,phone,mode:divarinoOtpFlow.mode};
+    if(otp)body.otp=otp;
+    if(action==='verify' && divarinoOtpFlow.mode==='register' && divarinoOtpFlow.username){
+      body.username=divarinoOtpFlow.username;
+    }
+    let response;
     try{
-      const [{data:byPhone},{data:byPassword}]=await Promise.all([
-        client.from('users').select('id,data').eq('data->>phone',p).limit(1),
-        client.from('users').select('id,data').eq('data->>passwordHash',passwordHash).limit(1)
-      ]);
-      if(byPhone?.length){e.textContent='این شماره تلفن قبلاً ثبت شده است.';e.classList.add('show');return}
-      if(byPassword?.length){e.textContent='این رمز عبور قبلاً توسط کاربر دیگری استفاده شده است. لطفاً رمز عبور دیگری انتخاب کنید.';e.classList.add('show');return}
-    }catch(err){console.warn('Supabase registration lookup failed',err)}
-    const user={id:crypto.randomUUID(),authUid:'',username:String(u).trim(),phone:p,passwordHash,accountVersion:'v4',subscription:false,blocked:false,blockedUsers:[],lastSeen:Date.now()};
-    state.users.push(user);state.session=user.id;try{localStorage.setItem(DIVARINO_SESSION_KEY,String(user.id));localStorage.setItem(DIVARINO_PERSISTENT_SESSION_KEY,String(user.id));localStorage.removeItem(DIVARINO_LOGOUT_MARKER_KEY)}catch(err){};save();flushSave();await window.divarinoRemotePutUser(user);
-    startOnlineAfterLogin(); show('ads');
-  };
-  window.login=async function(){
-    if(window.divarinoAccountResetPromise)await window.divarinoAccountResetPromise;
-    const p=normalizePhone(document.getElementById('ap').value),pass=document.getElementById('apass').value,remember=!!document.getElementById('rememberMe')?.checked,e=document.getElementById('authErr');e.classList.remove('show');
-    if(!p||!pass){e.textContent='شماره تلفن و رمز عبور را وارد کنید.';e.classList.add('show');return}
-    if(!validPassword(pass)){e.textContent='رمز عبور باید فقط شامل حروف انگلیسی یا عدد باشد.';e.classList.add('show');return}
-    const passwordHash=await hashPassword(pass);let user=null;
+      response=await fetch(DIVARINO_OTP_FUNCTION_URL,{method:'POST',headers,body:JSON.stringify(body)});
+    }catch(err){
+      throw new Error('ارتباط با سرویس تایید شماره برقرار نشد. Edge Function را Deploy کنید.');
+    }
+    let data={};
+    try{data=await response.json()}catch(err){data={}}
+    if(!response.ok){
+      const msg=String(data?.error||'خطا در ارتباط با سرویس تایید شماره تلفن.');
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  function renderOtpPhoneForm(mode){
+    divarinoOtpFlow.mode=mode;
+    const f=document.getElementById('authForm');
+    if(!f)return;
+    document.getElementById('authTitle').textContent=mode==='login'?'ورود به دیوارینو':'ثبت نام در دیوارینو';
+    document.getElementById('authSubtitle').textContent=mode==='login'?'شماره موبایل خود را وارد کنید تا کد ورود برایتان پیامک شود.':'شماره موبایل و نام خود را وارد کنید تا ثبت نام انجام شود.';
+    document.getElementById('regTab').className='btn '+(mode==='register'?'primary':'');
+    document.getElementById('loginTab').className='btn '+(mode==='login'?'primary':'');
+    f.innerHTML=`
+<div class="field"><div class="phone-box"><input id="ap" inputmode="tel" autocomplete="tel" placeholder="شماره موبایل"><span class="phone-code">+98</span></div></div>
+${mode==='register'?`<div class="field"><div class="phone-box"><input id="au" autocomplete="name" placeholder="نام و نام خانوادگی" dir="rtl"></div></div>
+<div class="auth-terms"><label><input type="checkbox" id="acceptTerms"><span>قوانین و شرایط</span> را می‌پذیرم.</label></div>`:''}
+<div id="authErr" class="error"></div>
+<button id="otpSendBtn" class="btn primary" onclick="divarinoSendOtp()">ارسال کد تایید</button>
+<div class="auth-divider"><span>ورود بدون رمز عبور</span></div>
+<div class="auth-switch">${mode==='login'?'حساب کاربری ندارید؟':'حساب کاربری دارید؟'} <button type="button" onclick="authMode('${mode==='login'?'register':'login'}')">${mode==='login'?'ثبت نام کنید':'ورود به حساب کاربری'}</button></div>`;
     try{
-      const {data,error}=await client.from('users').select('id,data').eq('data->>phone',p).limit(1);
-      if(error)throw error;
-      if(data?.[0])user={id:data[0].id,...data[0].data};
-    }catch(err){console.warn('Supabase login lookup failed',err)}
-    if(!user)user=state.users.find(x=>x.accountVersion==='v4'&&getUserPhone(x)===p&&x.passwordHash===passwordHash);
-    if(!user||user.passwordHash!==passwordHash){e.textContent='شماره تلفن یا رمز عبور اشتباه است.';e.classList.add('show');return}
-    if(user.blocked){e.textContent='حساب شما مسدود شده است.';e.classList.add('show');return}
-    user.phone=getUserPhone(user);if(!Array.isArray(user.blockedUsers))user.blockedUsers=[];divarinoMergeUser(user);state.session=user.id;try{localStorage.setItem(DIVARINO_SESSION_KEY,String(user.id));localStorage.setItem(DIVARINO_PERSISTENT_SESSION_KEY,String(user.id));localStorage.removeItem(DIVARINO_LOGOUT_MARKER_KEY);localStorage.setItem('divarino_last_login_phone',String(p))}catch(err){};save();flushSave();await rememberLoginCredential(p,pass,true);startOnlineAfterLogin();show('ads');
+      const lastPhone=localStorage.getItem('divarino_last_login_phone');
+      if(lastPhone&&document.getElementById('ap'))document.getElementById('ap').value=lastPhone;
+    }catch(err){}
+  }
+
+  function renderOtpVerifyForm(){
+    const f=document.getElementById('authForm');
+    if(!f)return;
+    document.getElementById('authTitle').textContent='تایید شماره موبایل';
+    document.getElementById('authSubtitle').textContent='کد ۶ رقمی ارسال‌شده به شماره '+divarinoOtpFlow.phone+' را وارد کنید.';
+    f.innerHTML=`
+<div class="field"><input id="otpCode" class="otp-code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="کد ۶ رقمی" oninput="this.value=otpDigits(this.value).replace(/[^0-9]/g,'').slice(0,6)"></div>
+<div id="authErr" class="error"></div>
+<button id="otpVerifyBtn" class="btn primary" onclick="divarinoVerifyOtp()">تایید و ورود</button>
+<button id="otpBackBtn" type="button" class="btn outline otp-back-btn" onclick="authMode(divarinoOtpFlow.mode)">تغییر شماره موبایل</button>
+<div class="auth-switch"><button type="button" onclick="divarinoResendOtp()">ارسال دوباره کد</button></div>`;
+    setTimeout(()=>document.getElementById('otpCode')?.focus(),80);
+  }
+
+  window.authMode=function(mode){
+    document.getElementById('bottomNav').style.display='none';
+    document.getElementById('siteHeader').style.display='none';
+    document.body.classList.add('auth-page');
+    renderOtpPhoneForm(mode==='register'?'register':'login');
   };
 
-  async function startOnlineAfterLogin(){
-    startChannels();
-    await syncUserData();
-    divarinoStartPresenceHeartbeat?.();
-  }
+  window.divarinoSendOtp=async function(){
+    const phoneInput=document.getElementById('ap');
+    const p=otpPhoneForApi(phoneInput?.value||'');
+    const mode=divarinoOtpFlow.mode;
+    otpSetError('');
+    if(!/^\+989\d{9}$/.test(p)){
+      otpSetError('شماره موبایل را به‌صورت صحیح وارد کنید؛ مثال: 09012345678');
+      return;
+    }
+    if(mode==='register'){
+      const username=String(document.getElementById('au')?.value||'').trim();
+      if(!validPersianUsername(username)){
+        otpSetError('نام و نام خانوادگی را فقط با حروف فارسی وارد کنید.');
+        return;
+      }
+      if(!document.getElementById('acceptTerms')?.checked){
+        otpSetError('پذیرش قوانین و شرایط برای ثبت نام الزامی است.');
+        return;
+      }
+      divarinoOtpFlow.username=username;
+    }else divarinoOtpFlow.username='';
+    divarinoOtpFlow.phone=p;
+    const btn=document.getElementById('otpSendBtn');
+    if(btn){btn.disabled=true;btn.textContent='در حال ارسال...'}
+    try{
+      await divarinoOtpRequest('send',p);
+      try{localStorage.setItem('divarino_last_login_phone',p)}catch(err){}
+      renderOtpVerifyForm();
+    }catch(err){
+      otpSetError(err?.message||'ارسال کد ناموفق بود.');
+    }finally{
+      if(btn){btn.disabled=false;btn.textContent='ارسال کد تایید'}
+    }
+  };
+
+  window.divarinoResendOtp=async function(){
+    if(!divarinoOtpFlow.phone)return;
+    otpSetError('');
+    try{
+      await divarinoOtpRequest('send',divarinoOtpFlow.phone);
+      otpSetError('کد جدید ارسال شد.');
+      const e=document.getElementById('authErr');
+      if(e)setTimeout(()=>e.classList.remove('show'),2500);
+    }catch(err){otpSetError(err?.message||'ارسال دوباره کد ناموفق بود.')}
+  };
+
+  window.divarinoVerifyOtp=async function(){
+    const raw=otpDigits(document.getElementById('otpCode')?.value||'').replace(/[^0-9]/g,'');
+    otpSetError('');
+    if(!/^\d{6}$/.test(raw)){otpSetError('کد تایید باید ۶ رقم باشد.');return}
+    const btn=document.getElementById('otpVerifyBtn');
+    if(btn){btn.disabled=true;btn.textContent='در حال بررسی...'}
+    try{
+      const result=await divarinoOtpRequest('verify',divarinoOtpFlow.phone,raw);
+      if(!result?.verified||!result?.user_id)throw new Error('تایید شماره انجام نشد.');
+      if(divarinoOtpFlow.mode==='login' && result.is_new_user===true){
+        throw new Error('این شماره هنوز ثبت نام نشده است. ابتدا از بخش ثبت نام حساب بسازید.');
+      }
+
+      // The Edge Function returns the verified user payload. Use it directly;
+      // this avoids a browser-side users-table lookup that can fail under RLS.
+      let user=result.user&&typeof result.user==='object'
+        ? {id:String(result.user_id),...result.user}
+        : null;
+
+      // Compatibility with older function responses/local cached users.
+      if(!user){
+        const targetPhone=otpPhoneForApi(divarinoOtpFlow.phone);
+        const cached=state.users.find(x=>String(x.id)===String(result.user_id))
+          ||state.users.find(x=>otpPhoneForApi(getUserPhone(x))===targetPhone);
+        if(cached)user={...cached,id:String(result.user_id)};
+      }
+
+      if(!user && result.is_new_user===true){
+        user={
+          id:String(result.user_id),
+          phone:divarinoOtpFlow.phone,
+          authUid:String(result.user_id),
+          username:divarinoOtpFlow.username||null,
+          name:divarinoOtpFlow.username||null,
+          accountVersion:1,
+          subscription:false,
+          blocked:false,
+          blockedUsers:[],
+          likedAds:[],
+          savedAds:[],
+          lastSeen:Date.now()
+        };
+      }
+
+      if(!user)throw new Error('اطلاعات حساب از سرور دریافت نشد. Edge Function را با نسخه جدید Deploy کنید.');
+
+      user.id=String(user.id||result.user_id);
+      user.phone=getUserPhone(user)||divarinoOtpFlow.phone;
+      if(!user.authUid)user.authUid=String(result.user_id);
+      if(divarinoOtpFlow.mode==='register' && result.is_new_user===true && divarinoOtpFlow.username){
+        user.username=divarinoOtpFlow.username;
+        if(!user.name)user.name=divarinoOtpFlow.username;
+      }
+      if(!Array.isArray(user.blockedUsers))user.blockedUsers=[];
+      if(!Array.isArray(user.likedAds))user.likedAds=[];
+      if(!Array.isArray(user.savedAds))user.savedAds=[];
+
+      if(user.blocked){otpSetError('حساب شما مسدود شده است.');return}
+
+      divarinoMergeUser(user);
+      state.session=String(user.id);
+      try{
+        localStorage.setItem(DIVARINO_SESSION_KEY,String(user.id));
+        localStorage.setItem(DIVARINO_PERSISTENT_SESSION_KEY,String(user.id));
+        localStorage.removeItem(DIVARINO_LOGOUT_MARKER_KEY);
+        localStorage.setItem('divarino_last_login_phone',divarinoOtpFlow.phone);
+      }catch(err){}
+      save();flushSave();
+      try{await startOnlineAfterLogin();}catch(syncErr){console.warn('Post-OTP sync warning',syncErr)}
+      show('ads');
+    }catch(err){
+      otpSetError(err?.message||'کد تایید نادرست است یا منقضی شده است.');
+    }finally{
+      if(btn){btn.disabled=false;btn.textContent='تایید و ورود'}
+    }
+  };
+
+
+  // The OTP flow replaces the old password-based login/register functions.
+  window.register=async function(){authMode('register')};
+  window.login=async function(){authMode('login')};
+
+  // Start on the passwordless login screen when the authentication page is shown.
+  if(document.getElementById('auth')?.classList.contains('active'))authMode('login');
 
   // Publish ads to the shared backend while preserving the current wizard and UI.
   window.publish=async function(){
